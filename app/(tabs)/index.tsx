@@ -2,16 +2,22 @@ import AsyncStorage from "@react-native-async-storage/async-storage";
 import { Audio } from "expo-av";
 import * as DocumentPicker from "expo-document-picker";
 import * as FileSystem from "expo-file-system/legacy";
+import { LinearGradient } from "expo-linear-gradient";
+import {
+  ExpoSpeechRecognitionModule,
+  useSpeechRecognitionEvent,
+} from "expo-speech-recognition";
 import React, { useEffect, useState } from "react";
 import {
   ActivityIndicator,
   Alert,
+  Platform,
   ScrollView,
   StyleSheet,
   TouchableOpacity,
+  View,
 } from "react-native";
 
-import { HelloWave } from "@/components/hello-wave";
 import { ThemedText } from "@/components/themed-text";
 import { ThemedView } from "@/components/themed-view";
 
@@ -23,20 +29,40 @@ export default function HomeScreen() {
   const [feedback, setFeedback] = useState<string>("");
   const [resumeText, setResumeText] = useState<string>("");
   const [hasResume, setHasResume] = useState(false);
+  const [isListening, setIsListening] = useState(false);
 
-  // Load saved resume on mount
+  // Listen for speech recognition results
+  useSpeechRecognitionEvent("result", (event) => {
+    const transcript = event.results[0]?.transcript.toLowerCase() || "";
+    console.log("Speech detected:", transcript);
+
+    // Check for stop keywords
+    if (
+      transcript.includes("stop recording") ||
+      transcript.includes("stop") ||
+      transcript.includes("finish") ||
+      transcript.includes("done") ||
+      transcript.includes("end recording")
+    ) {
+      console.log("Stop keyword detected!");
+      stopAndAnalyze();
+    }
+  });
+
   useEffect(() => {
     loadSavedResume();
   }, []);
 
-  // Clean up recording on unmount
   useEffect(() => {
     return () => {
       if (recording) {
         recording.stopAndUnloadAsync();
       }
+      if (isListening) {
+        ExpoSpeechRecognitionModule.stop();
+      }
     };
-  }, []);
+  }, [recording, isListening]);
 
   async function loadSavedResume() {
     try {
@@ -62,26 +88,22 @@ export default function HomeScreen() {
         const file = result.assets[0];
 
         setIsProcessing(true);
-        setFeedback("Extracting text from PDF...");
+        setFeedback("Extracting text from document...");
 
         let content = "";
 
         if (file.mimeType === "text/plain") {
-          // Plain text file - read directly
           content = await FileSystem.readAsStringAsync(file.uri);
         } else if (file.mimeType === "application/pdf") {
-          // For PDF: Read as base64, then use a simple extraction
           const base64 = await FileSystem.readAsStringAsync(file.uri, {
-            encoding: FileSystem.EncodingType.Base64,
+            encoding: "base64",
           });
-
-          // Use pdf-parse via a local function
           content = await extractPDFText(base64);
 
-          if (!content || content.trim().length === 0) {
+          if (!content || content.trim().length < 10) {
             Alert.alert(
               "Unable to Extract Text",
-              "Could not extract text from PDF. Please use a text file (.txt) or paste your resume manually.",
+              "Could not extract text from this PDF. Please try:\n\n1. A different PDF\n2. Converting to .txt file\n3. Copy/paste text manually",
             );
             setIsProcessing(false);
             setFeedback("");
@@ -89,7 +111,6 @@ export default function HomeScreen() {
           }
         }
 
-        // Save to AsyncStorage
         await AsyncStorage.setItem(RESUME_STORAGE_KEY, content);
         setResumeText(content);
         setHasResume(true);
@@ -106,41 +127,47 @@ export default function HomeScreen() {
     }
   }
 
-  // Helper function to extract text from PDF base64
   async function extractPDFText(base64: string): Promise<string> {
     try {
-      // Decode base64 to binary
       const binaryString = atob(base64);
       const bytes = new Uint8Array(binaryString.length);
       for (let i = 0; i < binaryString.length; i++) {
         bytes[i] = binaryString.charCodeAt(i);
       }
 
-      // Simple PDF text extraction (basic approach)
-      // This extracts text between BT and ET tags in PDF
-      const decoder = new TextDecoder("utf-8");
-      const text = decoder.decode(bytes);
-
-      // Extract text content from PDF structure
-      const textMatches = text.match(/\(([^)]+)\)/g);
-      if (textMatches) {
-        const extractedText = textMatches
-          .map((match) => match.slice(1, -1)) // Remove parentheses
-          .join(" ")
-          .replace(/\\r\\n/g, "\n")
-          .replace(/\\\(/g, "(")
-          .replace(/\\\)/g, ")")
-          .trim();
-
-        return extractedText;
+      let pdfString = "";
+      for (let i = 0; i < bytes.length; i++) {
+        pdfString += String.fromCharCode(bytes[i]);
       }
 
-      return "";
+      const matches = pdfString.match(/\(([^)]+)\)/g);
+
+      if (!matches) {
+        return "";
+      }
+
+      const text = matches
+        .map((match) => match.slice(1, -1))
+        .join(" ")
+        .replace(/\\n/g, "\n")
+        .replace(/\\r/g, "")
+        .replace(/\\t/g, " ")
+        .replace(/\\\(/g, "(")
+        .replace(/\\\)/g, ")")
+        .replace(/\\\\/g, "\\")
+        .replace(/\s+/g, " ")
+        .trim();
+
+      console.log("Extracted text length:", text.length);
+      console.log("Preview:", text.substring(0, 100));
+
+      return text;
     } catch (error) {
       console.error("PDF extraction error:", error);
       return "";
     }
   }
+
   async function clearResume() {
     try {
       await AsyncStorage.removeItem(RESUME_STORAGE_KEY);
@@ -159,10 +186,22 @@ export default function HomeScreen() {
     }
 
     try {
-      const permission = await Audio.requestPermissionsAsync();
-      if (permission.status !== "granted") {
+      // Request audio permission
+      const audioPermission = await Audio.requestPermissionsAsync();
+      if (audioPermission.status !== "granted") {
         alert("Permission to access microphone is required!");
         return;
+      }
+
+      // Request speech recognition permission
+      const speechPermission =
+        await ExpoSpeechRecognitionModule.requestPermissionsAsync();
+      if (!speechPermission.granted) {
+        Alert.alert(
+          "Permission Required",
+          "Speech recognition permission is needed for voice commands like 'stop recording'.",
+        );
+        // Continue anyway, just won't have voice commands
       }
 
       await Audio.setAudioModeAsync({
@@ -170,6 +209,7 @@ export default function HomeScreen() {
         playsInSilentModeIOS: true,
       });
 
+      // Start audio recording
       const { recording } = await Audio.Recording.createAsync({
         isMeteringEnabled: true,
         android: {
@@ -195,6 +235,22 @@ export default function HomeScreen() {
       });
 
       setRecording(recording);
+
+      // Start speech recognition for keyword detection
+      try {
+        ExpoSpeechRecognitionModule.start({
+          lang: "en-US",
+          interimResults: true,
+          maxAlternatives: 1,
+          continuous: true,
+          requiresOnDeviceRecognition: false,
+        });
+        setIsListening(true);
+        console.log("Speech recognition started");
+      } catch (speechError) {
+        console.error("Speech recognition failed to start:", speechError);
+        // Continue with recording even if speech recognition fails
+      }
     } catch (err) {
       console.error("Failed to start recording", err);
       alert("Recording failed to start. Check your console for details.");
@@ -204,40 +260,43 @@ export default function HomeScreen() {
   async function stopAndAnalyze() {
     if (!recording) return;
 
+    // Stop speech recognition first
+    if (isListening) {
+      try {
+        ExpoSpeechRecognitionModule.stop();
+        setIsListening(false);
+        console.log("Speech recognition stopped");
+      } catch (err) {
+        console.error("Error stopping speech recognition:", err);
+      }
+    }
+
     setRecording(null);
     setIsProcessing(true);
     setFeedback("Thinking...");
-
-    console.log("=== STOP AND ANALYZE STARTED ===");
 
     try {
       await recording.stopAndUnloadAsync();
       const uri = recording.getURI();
 
-      console.log("Step 1: Recording stopped, URI:", uri);
-
       if (uri) {
-        console.log("Step 2: Converting audio to base64...");
-
         const base64Audio = await FileSystem.readAsStringAsync(uri, {
-          encoding: FileSystem.EncodingType.Base64,
+          encoding: "base64",
         });
-
-        console.log("Step 3: Base64 length:", base64Audio.length);
-        console.log("Step 4: Sending request to OpenRouter...");
 
         const response = await fetch(
           "https://openrouter.ai/api/v1/chat/completions",
           {
             method: "POST",
             headers: {
-              Authorization: `Bearer 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`, // 👈 Put your NEW key here
+              Authorization: `Bearer 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`,
               "Content-Type": "application/json",
               "HTTP-Referer": "https://expo.dev",
               "X-Title": "Career Coach App",
             },
             body: JSON.stringify({
-              model: "openai/gpt-4o-audio-preview",
+              model: "openai/gpt-audio",
+              modalities: ["text"],
               messages: [
                 {
                   role: "system",
@@ -261,100 +320,90 @@ export default function HomeScreen() {
           },
         );
 
-        console.log("Step 5: Response status:", response.status);
-
         const data = await response.json();
 
         if (data.error) {
-          console.log("Step 8: ERROR in response:", JSON.stringify(data.error));
           setFeedback(
             `API Error: ${data.error.message || JSON.stringify(data.error)}`,
           );
         } else {
-          console.log("Step 8: Success!");
           setFeedback(
             data.choices[0]?.message?.content || "Could not analyze audio.",
           );
         }
       }
     } catch (error) {
-      console.log("=== ERROR CAUGHT ===");
-      if (error instanceof Error) {
-        console.log("Error message:", error.message);
-      }
-
       setFeedback(
-        `Error: ${error instanceof Error ? error.message : "Unknown error processing audio"}`,
+        `Error: ${error instanceof Error ? error.message : "Unknown error"}`,
       );
     } finally {
       setIsProcessing(false);
-      console.log("=== STOP AND ANALYZE FINISHED ===");
     }
   }
 
   return (
     <ThemedView style={styles.container}>
       <ScrollView contentContainerStyle={styles.scrollContent}>
-        <ThemedView style={styles.header}>
-          <ThemedText type="title">Career Coach</ThemedText>
-          <HelloWave />
-        </ThemedView>
+        <View style={styles.header}>
+          <ThemedText style={styles.brandText}>
+            ECHO - Your Personal Career Coach
+          </ThemedText>
+          <ThemedText style={styles.titleText}>INTEL COACH</ThemedText>
+        </View>
 
-        <ThemedView style={styles.main}>
-          {/* Resume Status */}
+        <View style={styles.main}>
           <ThemedView style={styles.resumeStatus}>
-            <ThemedText style={styles.statusText}>
-              Resume: {hasResume ? "✅ Uploaded" : "❌ Not uploaded"}
-            </ThemedText>
-            {hasResume ? (
-              <TouchableOpacity
-                onPress={clearResume}
-                style={styles.smallButton}
-              >
-                <ThemedText style={styles.smallButtonText}>Clear</ThemedText>
-              </TouchableOpacity>
-            ) : (
-              <TouchableOpacity
-                onPress={uploadResume}
-                style={styles.smallButton}
-              >
-                <ThemedText style={styles.smallButtonText}>
-                  Upload Resume
-                </ThemedText>
-              </TouchableOpacity>
-            )}
+            <View>
+              <ThemedText style={styles.label}>UPLOAD_RESUME</ThemedText>
+              <ThemedText style={styles.statusText}>
+                {hasResume ? "RESUME: ACTIVE" : "RESUME: NO_DATA"}
+              </ThemedText>
+            </View>
+            <TouchableOpacity
+              onPress={hasResume ? clearResume : uploadResume}
+              style={styles.smallButton}
+            >
+              <ThemedText style={styles.smallButtonText}>
+                {hasResume ? "CLEAR" : "UPLOAD"}
+              </ThemedText>
+            </TouchableOpacity>
           </ThemedView>
 
           <ThemedText style={styles.instruction}>
             {recording
-              ? "I'm listening... Tap stop when you're done."
-              : "Tap the button below to record your interview answer."}
+              ? "RECEIVING_INPUT... (Say 'stop' to finish)"
+              : "READY_FOR_COMMUNICATION"}
           </ThemedText>
 
           <TouchableOpacity
-            style={[
-              styles.recordButton,
-              recording ? styles.recording : styles.idle,
-            ]}
+            activeOpacity={0.8}
             onPress={recording ? stopAndAnalyze : startRecording}
             disabled={isProcessing}
+            style={styles.recordButtonContainer}
           >
-            {isProcessing ? (
-              <ActivityIndicator color="#fff" />
-            ) : (
-              <ThemedText style={styles.buttonText}>
-                {recording ? "Stop Recording" : "Start Recording"}
-              </ThemedText>
-            )}
+            <LinearGradient
+              colors={
+                recording ? ["#FF1A1A", "#800000"] : ["#FF6B00", "#FF9500"]
+              }
+              style={styles.recordButton}
+            >
+              {isProcessing ? (
+                <ActivityIndicator color="#fff" />
+              ) : (
+                <View style={recording ? styles.stopIcon : styles.startIcon} />
+              )}
+            </LinearGradient>
           </TouchableOpacity>
 
           {feedback ? (
             <ThemedView style={styles.feedbackBox}>
-              <ThemedText type="subtitle">AI Feedback:</ThemedText>
+              <ThemedText style={styles.feedbackLabel}>
+                INTEL_REPORT_
+              </ThemedText>
               <ThemedText style={styles.feedbackText}>{feedback}</ThemedText>
             </ThemedView>
           ) : null}
-        </ThemedView>
+        </View>
       </ScrollView>
     </ThemedView>
   );
@@ -363,82 +412,116 @@ export default function HomeScreen() {
 const styles = StyleSheet.create({
   container: {
     flex: 1,
+    backgroundColor: "#050505",
   },
   scrollContent: {
     paddingTop: 80,
-    paddingHorizontal: 20,
-    paddingBottom: 40,
+    paddingHorizontal: 24,
+    paddingBottom: 60,
   },
   header: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 8,
-    marginBottom: 24,
+    marginBottom: 30,
+  },
+  brandText: {
+    color: "#FF6B00",
+    fontSize: 10,
+    fontFamily: Platform.OS === "ios" ? "Courier" : "monospace",
+    letterSpacing: 3,
+    marginBottom: 4,
+  },
+  titleText: {
+    color: "#FFFFFF",
+    fontSize: 28,
+    fontWeight: "900",
+    letterSpacing: -1,
+    paddingTop: 15,
   },
   main: {
     alignItems: "center",
-    gap: 20,
+    gap: 30,
   },
   resumeStatus: {
     width: "100%",
     flexDirection: "row",
     justifyContent: "space-between",
     alignItems: "center",
-    padding: 15,
-    backgroundColor: "rgba(150, 150, 150, 0.1)",
-    borderRadius: 12,
+    padding: 20,
+    backgroundColor: "#111",
+    borderLeftWidth: 3,
+    borderLeftColor: "#FF6B00",
+  },
+  label: {
+    color: "#666",
+    fontSize: 9,
+    fontWeight: "bold",
+    letterSpacing: 1,
   },
   statusText: {
-    fontSize: 14,
+    color: "#FFF",
+    fontSize: 13,
+    fontWeight: "600",
+    marginTop: 2,
   },
   smallButton: {
-    paddingHorizontal: 15,
+    paddingHorizontal: 16,
     paddingVertical: 8,
-    backgroundColor: "#007AFF",
-    borderRadius: 8,
+    backgroundColor: "#FF6B00",
+    borderRadius: 2,
   },
   smallButtonText: {
     color: "#fff",
-    fontSize: 12,
-    fontWeight: "600",
+    fontSize: 10,
+    fontWeight: "900",
   },
   instruction: {
     textAlign: "center",
-    fontSize: 16,
-    opacity: 0.8,
+    fontSize: 12,
+    color: "#444",
+    fontFamily: Platform.OS === "ios" ? "Courier" : "monospace",
+  },
+  recordButtonContainer: {
+    width: 100,
+    height: 100,
+    borderRadius: 50,
+    padding: 6,
+    borderWidth: 1,
+    borderColor: "#222",
   },
   recordButton: {
     width: "100%",
-    height: 60,
-    borderRadius: 30,
+    height: "100%",
+    borderRadius: 44,
     justifyContent: "center",
     alignItems: "center",
-    elevation: 4,
-    shadowColor: "#000",
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.25,
-    shadowRadius: 3.84,
   },
-  idle: {
-    backgroundColor: "#007AFF",
+  startIcon: {
+    width: 30,
+    height: 30,
+    borderRadius: 15,
+    backgroundColor: "#FFF",
   },
-  recording: {
-    backgroundColor: "#FF3B30",
-  },
-  buttonText: {
-    color: "#fff",
-    fontWeight: "bold",
-    fontSize: 18,
+  stopIcon: {
+    width: 24,
+    height: 24,
+    borderRadius: 4,
+    backgroundColor: "#FFF",
   },
   feedbackBox: {
     width: "100%",
-    padding: 20,
-    borderRadius: 16,
-    backgroundColor: "rgba(150, 150, 150, 0.1)",
-    marginTop: 20,
+    padding: 24,
+    backgroundColor: "#111",
+    borderTopWidth: 1,
+    borderTopColor: "#222",
+  },
+  feedbackLabel: {
+    color: "#FF6B00",
+    fontSize: 11,
+    fontWeight: "bold",
+    marginBottom: 12,
   },
   feedbackText: {
-    marginTop: 10,
-    lineHeight: 22,
+    color: "#AAA",
+    fontSize: 15,
+    lineHeight: 24,
   },
 });
