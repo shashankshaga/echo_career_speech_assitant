@@ -259,7 +259,7 @@ export default function HomeScreen() {
           {
             method: "POST",
             headers: {
-              Authorization: `Bearer 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`,
+              Authorization: `Bearer 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`,
               "Content-Type": "application/json",
               "HTTP-Referer": "https://expo.dev",
               "X-Title": "Career Coach App",
@@ -277,7 +277,7 @@ export default function HomeScreen() {
                   content: [
                     {
                       type: "text",
-                      text: "Listen to this interview answer and provide feedback.",
+                      text: "Listen to this interview answer and provide feedback using his resume and what he could have said better by showing examples.",
                     },
                     {
                       type: "input_audio",
@@ -316,7 +316,7 @@ export default function HomeScreen() {
       <ScrollView contentContainerStyle={styles.scrollContent}>
         <View style={styles.header}>
           <ThemedText style={styles.brandText}>
-            ECHO - Your Personal Career Coach
+            INTEL - Your Personal Career Coach
           </ThemedText>
           <ThemedText style={styles.titleText}>INTEL COACH</ThemedText>
         </View>

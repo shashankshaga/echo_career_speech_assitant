@@ -27,7 +27,7 @@ export default function TabLayout() {
       <Tabs.Screen
         name="index"
         options={{
-          title: "CORE",
+          title: "Audio",
           tabBarIcon: ({ color }) => (
             <IconSymbol size={24} name="mic.fill" color={color} />
           ),
@@ -36,7 +36,7 @@ export default function TabLayout() {
       <Tabs.Screen
         name="explore"
         options={{
-          title: "INTEL",
+          title: "Contacts",
           tabBarIcon: ({ color }) => (
             <IconSymbol size={24} name="chart.bar.fill" color={color} />
           ),

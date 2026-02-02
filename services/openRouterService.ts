@@ -1,5 +1,5 @@
 const OPENROUTER_API_KEY =
-  "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";
+  "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";
 
 export const analyzeInterview = async (
   base64Audio: string,
