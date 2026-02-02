@@ -3,14 +3,11 @@ import { Audio } from "expo-av";
 import * as DocumentPicker from "expo-document-picker";
 import * as FileSystem from "expo-file-system/legacy";
 import { LinearGradient } from "expo-linear-gradient";
-import {
-  ExpoSpeechRecognitionModule,
-  useSpeechRecognitionEvent,
-} from "expo-speech-recognition";
 import React, { useEffect, useState } from "react";
 import {
   ActivityIndicator,
   Alert,
+  Clipboard,
   Platform,
   ScrollView,
   StyleSheet,
@@ -29,25 +26,7 @@ export default function HomeScreen() {
   const [feedback, setFeedback] = useState<string>("");
   const [resumeText, setResumeText] = useState<string>("");
   const [hasResume, setHasResume] = useState(false);
-  const [isListening, setIsListening] = useState(false);
-
-  // Listen for speech recognition results
-  useSpeechRecognitionEvent("result", (event) => {
-    const transcript = event.results[0]?.transcript.toLowerCase() || "";
-    console.log("Speech detected:", transcript);
-
-    // Check for stop keywords
-    if (
-      transcript.includes("stop recording") ||
-      transcript.includes("stop") ||
-      transcript.includes("finish") ||
-      transcript.includes("done") ||
-      transcript.includes("end recording")
-    ) {
-      console.log("Stop keyword detected!");
-      stopAndAnalyze();
-    }
-  });
+  const [recordingTime, setRecordingTime] = useState(0);
 
   useEffect(() => {
     loadSavedResume();
@@ -56,13 +35,28 @@ export default function HomeScreen() {
   useEffect(() => {
     return () => {
       if (recording) {
-        recording.stopAndUnloadAsync();
-      }
-      if (isListening) {
-        ExpoSpeechRecognitionModule.stop();
+        recording.stopAndUnloadAsync().catch((error) => {
+          console.log("Cleanup error (safe to ignore):", error);
+        });
       }
     };
-  }, [recording, isListening]);
+  }, []);
+
+  useEffect(() => {
+    let interval: ReturnType<typeof setInterval> | null = null;
+
+    if (recording) {
+      interval = setInterval(() => {
+        setRecordingTime((prev) => prev + 1);
+      }, 1000);
+    } else {
+      setRecordingTime(0);
+    }
+
+    return () => {
+      if (interval) clearInterval(interval);
+    };
+  }, [recording]);
 
   async function loadSavedResume() {
     try {
@@ -186,22 +180,10 @@ export default function HomeScreen() {
     }
 
     try {
-      // Request audio permission
-      const audioPermission = await Audio.requestPermissionsAsync();
-      if (audioPermission.status !== "granted") {
+      const permission = await Audio.requestPermissionsAsync();
+      if (permission.status !== "granted") {
         alert("Permission to access microphone is required!");
         return;
-      }
-
-      // Request speech recognition permission
-      const speechPermission =
-        await ExpoSpeechRecognitionModule.requestPermissionsAsync();
-      if (!speechPermission.granted) {
-        Alert.alert(
-          "Permission Required",
-          "Speech recognition permission is needed for voice commands like 'stop recording'.",
-        );
-        // Continue anyway, just won't have voice commands
       }
 
       await Audio.setAudioModeAsync({
@@ -209,7 +191,6 @@ export default function HomeScreen() {
         playsInSilentModeIOS: true,
       });
 
-      // Start audio recording
       const { recording } = await Audio.Recording.createAsync({
         isMeteringEnabled: true,
         android: {
@@ -235,41 +216,30 @@ export default function HomeScreen() {
       });
 
       setRecording(recording);
-
-      // Start speech recognition for keyword detection
-      try {
-        ExpoSpeechRecognitionModule.start({
-          lang: "en-US",
-          interimResults: true,
-          maxAlternatives: 1,
-          continuous: true,
-          requiresOnDeviceRecognition: false,
-        });
-        setIsListening(true);
-        console.log("Speech recognition started");
-      } catch (speechError) {
-        console.error("Speech recognition failed to start:", speechError);
-        // Continue with recording even if speech recognition fails
-      }
     } catch (err) {
       console.error("Failed to start recording", err);
       alert("Recording failed to start. Check your console for details.");
     }
   }
 
+  function formatTime(seconds: number): string {
+    const mins = Math.floor(seconds / 60);
+    const secs = seconds % 60;
+    return `${mins}:${secs.toString().padStart(2, "0")}`;
+  }
+
+  function copyFeedback() {
+    if (feedback) {
+      Clipboard.setString(feedback);
+      Alert.alert(
+        "Copied!",
+        "Feedback copied to clipboard. Go to Analytics to paste it into a contact.",
+      );
+    }
+  }
+
   async function stopAndAnalyze() {
     if (!recording) return;
-
-    // Stop speech recognition first
-    if (isListening) {
-      try {
-        ExpoSpeechRecognitionModule.stop();
-        setIsListening(false);
-        console.log("Speech recognition stopped");
-      } catch (err) {
-        console.error("Error stopping speech recognition:", err);
-      }
-    }
 
     setRecording(null);
     setIsProcessing(true);
@@ -289,7 +259,7 @@ export default function HomeScreen() {
           {
             method: "POST",
             headers: {
-              Authorization: `Bearer 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`,
+              Authorization: `Bearer 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`,
               "Content-Type": "application/json",
               "HTTP-Referer": "https://expo.dev",
               "X-Title": "Career Coach App",
@@ -371,7 +341,7 @@ export default function HomeScreen() {
 
           <ThemedText style={styles.instruction}>
             {recording
-              ? "RECEIVING_INPUT... (Say 'stop' to finish)"
+              ? `RECORDING: ${formatTime(recordingTime)}`
               : "READY_FOR_COMMUNICATION"}
           </ThemedText>
 
@@ -401,6 +371,15 @@ export default function HomeScreen() {
                 INTEL_REPORT_
               </ThemedText>
               <ThemedText style={styles.feedbackText}>{feedback}</ThemedText>
+
+              <TouchableOpacity
+                onPress={copyFeedback}
+                style={styles.copyButton}
+              >
+                <ThemedText style={styles.copyButtonText}>
+                  📋 COPY TO CLIPBOARD
+                </ThemedText>
+              </TouchableOpacity>
             </ThemedView>
           ) : null}
         </View>
@@ -523,5 +502,20 @@ const styles = StyleSheet.create({
     color: "#AAA",
     fontSize: 15,
     lineHeight: 24,
+    marginBottom: 16,
+  },
+  copyButton: {
+    backgroundColor: "#FF6B00",
+    paddingVertical: 12,
+    paddingHorizontal: 20,
+    borderRadius: 4,
+    alignItems: "center",
+    marginTop: 8,
+  },
+  copyButtonText: {
+    color: "#FFFFFF",
+    fontSize: 12,
+    fontWeight: "900",
+    letterSpacing: 1,
   },
 });
